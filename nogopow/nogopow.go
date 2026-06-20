@@ -418,6 +418,11 @@ func (t *NogopowEngine) ComputePoWWithCache(blockHash, seed Hash, cacheData []ui
 	return hashMatrix(result)
 }
 
+// CacheData returns the cached computation data for the given seed.
+func (t *NogopowEngine) CacheData(seed Hash) []uint32 {
+	return t.cache.GetData(seed.Bytes())
+}
+
 // SealHash returns the hash of a block prior to sealing
 func (t *NogopowEngine) SealHash(header *Header) Hash {
 	hasher := sha3.NewLegacyKeccak256()
