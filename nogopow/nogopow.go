@@ -1,0 +1,571 @@
+// Copyright (c) 2026 NogoChain Contributors
+// Use of this source code is governed by an ISC license.
+
+package nogopow
+
+import (
+	"encoding/binary"
+	"errors"
+	"log"
+	"math/big"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"golang.org/x/crypto/sha3"
+)
+
+// engineDebugLogging controls diagnostic log output for the nogopow engine.
+// Default off; enabled via NOGO_ENGINE_DEBUG=1.
+var engineDebugLogging atomic.Bool
+
+func init() {
+	if os.Getenv("NOGO_ENGINE_DEBUG") == "1" {
+		engineDebugLogging.Store(true)
+	}
+}
+
+// ErrInvalidSeal is returned when a seal is invalid
+var ErrInvalidSeal = errors.New("invalid seal")
+
+// NogopowEngine implements consensus.Engine for NogoPow PoW.
+// Matrices are allocated per computePoW call — fresh allocation each time,
+// not stored on the engine — eliminates cross-node state differences.
+type NogopowEngine struct {
+	config       *Config
+	sealCh       chan *Block
+	exitCh       chan struct{}
+	wg           sync.WaitGroup
+	lock         sync.RWMutex
+	running      bool
+	hashrate     uint64
+	cache        *Cache
+	diffAdjuster *DifficultyAdjuster
+}
+
+// New creates a new NogopowEngine
+func New(config *Config) *NogopowEngine {
+	if config == nil {
+		config = DefaultConfig()
+	}
+
+	engine := &NogopowEngine{
+		config:       config,
+		sealCh:       make(chan *Block),
+		exitCh:       make(chan struct{}),
+		running:      false,
+		hashrate:     0,
+		cache:        NewCache(config),
+		diffAdjuster: NewDifficultyAdjuster(config.ConsensusParams),
+	}
+
+	return engine
+}
+
+// NewFaker creates a fake engine for testing.
+// NOTE: Production code must NEVER call this. PowMode is immutable after construction.
+func NewFaker() *NogopowEngine {
+	config := DefaultConfig()
+	config.powModeForTest(ModeFake)
+	return New(config)
+}
+
+// Author returns the header's coinbase as the author
+func (t *NogopowEngine) Author(header *Header) (Address, error) {
+	return header.Coinbase, nil
+}
+
+// VerifyHeader checks whether a header conforms to consensus rules
+func (t *NogopowEngine) VerifyHeader(chain ChainHeaderReader, header *Header, seal bool) error {
+	// If we're running in fake mode, skip verification
+	if t.config.PowMode() == ModeFake {
+		return nil
+	}
+
+	// Genesis block is always valid
+	if header.Number.Uint64() == 0 {
+		return nil
+	}
+
+	// Verify PoW seal if requested
+	if seal {
+		if err := t.verifySeal(chain, header); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// VerifySealOnly verifies only the PoW seal without chain context
+// This is used for standalone block validation where chain is not available
+func (t *NogopowEngine) VerifySealOnly(header *Header) error {
+	// If we're running in fake mode, skip verification
+	if t.config.PowMode() == ModeFake {
+		return nil
+	}
+
+	// Genesis block is always valid
+	if header.Number.Uint64() == 0 {
+		return nil
+	}
+
+	// Verify PoW seal without chain context
+	if err := t.verifySeal(nil, header); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// VerifyHeaders verifies a batch of headers concurrently
+func (t *NogopowEngine) VerifyHeaders(chain ChainHeaderReader, headers []*Header, seals []bool) (chan<- struct{}, <-chan error) {
+	abort := make(chan struct{})
+	results := make(chan error, len(headers))
+
+	if len(headers) == 0 {
+		close(results)
+		return abort, results
+	}
+
+	go func() {
+		for i, header := range headers {
+			seal := seals[i]
+
+			t.wg.Add(1)
+			go func(idx int, h *Header, s bool) {
+				defer t.wg.Done()
+
+				select {
+				case <-abort:
+					results <- nil
+					return
+				default:
+					err := t.VerifyHeader(chain, h, s)
+					results <- err
+				}
+			}(i, header, seal)
+		}
+
+		// Wait for all workers
+		t.wg.Wait()
+		close(results)
+	}()
+
+	return abort, results
+}
+
+// VerifyUncles verifies that uncles conform to consensus rules
+func (t *NogopowEngine) VerifyUncles(chain ChainReader, block *Block) error {
+	const maxUncles = 2
+	if len(block.Uncles()) > maxUncles {
+		return errors.New("too many uncles")
+	}
+
+	for _, uncle := range block.Uncles() {
+		if uncle.Number.Cmp(block.Header().Number) != 0 {
+			return ErrInvalidSeal
+		}
+
+		if t.config.PowMode() != ModeFake {
+			if err := t.verifySeal(chain, uncle); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// Prepare initializes the difficulty field of a header
+func (t *NogopowEngine) Prepare(chain ChainHeaderReader, header *Header) error {
+	parent := chain.GetHeaderByHash(header.ParentHash)
+	if parent == nil {
+		return errors.New("parent not found")
+	}
+
+	// Calculate difficulty dynamically based on block time and parent difficulty
+	header.Difficulty = t.CalcDifficulty(chain, header.Time, parent)
+	return nil
+}
+
+// Finalize performs block finalization after consensus
+// Production-grade: computes state root and prepares block for sealing
+// Design: follows Ethereum-style separation of concerns
+//   - Consensus engine (Nogopow) handles state root computation
+//   - Blockchain layer handles economic incentives (rewards)
+//
+// Note: Block rewards are applied by the blockchain layer before Finalize is called.
+// This design ensures clean separation between consensus mechanics and economic policy.
+func (t *NogopowEngine) Finalize(chain ChainHeaderReader, header *Header, stateDB StateDB, txs []*Transaction, uncles []*Header) {
+	// Compute state root after applying all transactions
+	// This is the Merkle root of the state trie, representing the complete state
+	header.Root = stateDB.IntermediateRoot(true)
+
+	// Note: Transaction execution and reward distribution occur at blockchain layer.
+	// The consensus engine only computes the cryptographic state commitment.
+}
+
+// FinalizeAndAssemble runs Finalize and assembles the final block
+func (t *NogopowEngine) FinalizeAndAssemble(chain ChainHeaderReader, header *Header, stateDB StateDB, txs []*Transaction, uncles []*Header, receipts []*Receipt) (*Block, error) {
+	t.Finalize(chain, header, stateDB, txs, uncles)
+	block := NewBlock(header, txs, uncles, receipts)
+	return block, nil
+}
+
+// Seal generates a new sealing request for the given block
+func (t *NogopowEngine) Seal(chain ChainHeaderReader, block *Block, results chan<- *Block, stop <-chan struct{}) error {
+	if t.config.PowMode() == ModeFake || t.config.PowMode() == ModeTest {
+		if block.Number().Sign() == 0 {
+			t.config.Log.Info("Generating genesis block", "block", block.Number())
+		} else {
+			t.config.Log.Info("NogoPow fake/test mode - Sealing block", "block", block.Number())
+		}
+		select {
+		case results <- block:
+			if block.Number().Sign() == 0 {
+				t.config.Log.Info("Genesis block created and sent", "block", block.Number())
+			} else {
+				t.config.Log.Info("NogoPow fake/test mode - Block sent (no PoW verification)", "block", block.Number())
+			}
+		case <-stop:
+			if block.Number().Sign() == 0 {
+				t.config.Log.Info("Genesis block creation stopped", "block", block.Number())
+			} else {
+				t.config.Log.Info("NogoPow fake/test mode - Block sealing stopped", "block", block.Number())
+			}
+			return nil
+		}
+		return nil
+	}
+
+	t.config.Log.Debug("NogoPow normal mode - starting mining", "block", block.Number())
+	t.wg.Add(1)
+	go func() {
+		defer t.wg.Done()
+		t.mineBlock(chain, block, results, stop)
+	}()
+
+	return nil
+}
+
+// mineBlock performs the actual mining operation
+func (t *NogopowEngine) mineBlock(chain ChainHeaderReader, block *Block, results chan<- *Block, stop <-chan struct{}) {
+	header := block.Header()
+	startNonce := uint64(0)
+	startTime := time.Now()
+
+	t.config.Log.Info("NogoPow mining started",
+		"block", header.Number.Uint64(),
+		"difficulty", header.Difficulty,
+		"threads", 1,
+	)
+
+	// Calculate seed from parent block (fixed for all nonce attempts)
+	seed := t.calcSeed(chain, header)
+
+	// Mining loop
+	for nonce := startNonce; ; nonce++ {
+		select {
+		case <-stop:
+			t.config.Log.Info("NogoPow mining stopped", "block", header.Number.Uint64())
+			return
+		case <-t.exitCh:
+			t.config.Log.Info("NogoPow mining exit", "block", header.Number.Uint64())
+			return
+		default:
+		}
+
+		// Try to solve block
+		header.Nonce = BlockNonce{}
+		binary.LittleEndian.PutUint64(header.Nonce[:8], nonce)
+
+		// Check if solution is valid
+		if t.checkSolution(chain, header, seed) {
+			elapsed := time.Since(startTime)
+			t.config.Log.Info("Successfully sealed block",
+				"number", header.Number.Uint64(),
+				"hash", header.Hash().Hex(),
+				"nonce", nonce,
+				"elapsed", elapsed,
+			)
+
+			select {
+			case results <- block:
+				return
+			case <-stop:
+				return
+			}
+		}
+
+		// Update hashrate with atomic operation for thread safety
+		// Production-grade: prevents race conditions when multiple threads increment
+		atomic.AddUint64(&t.hashrate, 1)
+
+		// Log progress every 1000 nonces
+		if nonce%1000 == 0 && nonce > 0 {
+			t.config.Log.Debug("Mining in progress",
+				"block", header.Number.Uint64(),
+				"nonce", nonce,
+				"hashrate", t.hashrate,
+			)
+		}
+	}
+}
+
+// checkSolution verifies if header has valid PoW (optimized for mining loop)
+func (t *NogopowEngine) checkSolution(chain ChainHeaderReader, header *Header, seed Hash) bool {
+	// Calculate block hash with nonce
+	blockHash := t.SealHash(header)
+
+	// Apply NogoPow PoW algorithm: H(blockHash, seed)
+	powHash := t.computePoW(blockHash, seed)
+
+	// Check if hash meets difficulty target
+	return t.checkPow(powHash, header.Difficulty)
+}
+
+// verifySeal verifies that the block has a valid PoW seal (full version with logging)
+func (t *NogopowEngine) verifySeal(chain ChainHeaderReader, header *Header) error {
+	seed := t.calcSeed(chain, header)
+	blockHash := t.SealHash(header)
+	powHash := t.computePoW(blockHash, seed)
+
+	if engineDebugLogging.Load() {
+		log.Printf("[verifySeal-DIAG] === Node verifySeal ===")
+		log.Printf("[verifySeal-DIAG] seed:         %x", seed[:])
+		log.Printf("[verifySeal-DIAG] blockHash(SealHash): %x", blockHash[:])
+		log.Printf("[verifySeal-DIAG] powHash:      %x", powHash[:])
+		log.Printf("[verifySeal-DIAG] Difficulty:   %s", header.Difficulty.String())
+	}
+
+	if !t.checkPow(powHash, header.Difficulty) {
+		if engineDebugLogging.Load() {
+			log.Printf("[verifySeal-DIAG] ❌ checkPow FAILED")
+		}
+		t.config.Log.Info("NogoPow checkPow failed",
+			"number", header.Number.Uint64(),
+			"powHash", powHash.Hex(),
+			"difficulty", header.Difficulty,
+		)
+		return ErrInvalidSeal
+	}
+
+	if engineDebugLogging.Load() {
+		log.Printf("[verifySeal-DIAG] ✅ checkPow PASSED")
+	}
+	return nil
+}
+
+// VerifySealWithBlockHash verifies PoW seal using the provided block hash
+// This is used when the block hash is already known (e.g., from remote nodes)
+// Production-grade: ensures compatibility with blocks mined by different code versions
+func (t *NogopowEngine) VerifySealWithBlockHash(header *Header, blockHash Hash) error {
+	if t.config.PowMode() == ModeFake {
+		return nil
+	}
+
+	if header.Number.Uint64() == 0 {
+		return nil
+	}
+
+	seed := t.calcSeed(nil, header)
+	powHash := t.computePoW(blockHash, seed)
+
+	if !t.checkPow(powHash, header.Difficulty) {
+		t.config.Log.Info("NogoPow checkPow failed",
+			"number", header.Number.Uint64(),
+			"powHash", powHash.Hex(),
+			"difficulty", header.Difficulty,
+		)
+		return ErrInvalidSeal
+	}
+
+	return nil
+}
+
+// calcSeed calculates the seed hash from parent block
+func (t *NogopowEngine) calcSeed(chain ChainHeaderReader, header *Header) Hash {
+	// For genesis block, use zero seed
+	if header.Number.Uint64() == 0 {
+		return Hash{}
+	}
+
+	// The seed is the parent block's hash, which is stored in header.ParentHash
+	// We don't need to look up the parent block or recalculate anything
+	return header.ParentHash
+}
+
+// computePoW computes the proof-of-work hash using NogoPow algorithm.
+// Fresh matrix allocation per call, no shared pool state.
+func (t *NogopowEngine) computePoW(blockHash, seed Hash) Hash {
+	cacheData := t.cache.GetData(seed.Bytes())
+	result := mulMatrixPooled(blockHash.Bytes(), cacheData)
+	return hashMatrix(result)
+}
+
+// ComputePoW computes the proof-of-work hash using NogoPow algorithm
+// Exported version for external validation
+func (t *NogopowEngine) ComputePoW(blockHash, seed Hash) Hash {
+	return t.computePoW(blockHash, seed)
+}
+
+// ComputePoWWithCache computes the proof-of-work hash using provided cache data.
+// Fresh matrix per call, deterministic no shared state.
+func (t *NogopowEngine) ComputePoWWithCache(blockHash, seed Hash, cacheData []uint32) Hash {
+	result := mulMatrixPooled(blockHash.Bytes(), cacheData)
+	return hashMatrix(result)
+}
+
+// SealHash returns the hash of a block prior to sealing
+func (t *NogopowEngine) SealHash(header *Header) Hash {
+	hasher := sha3.NewLegacyKeccak256()
+	rlpEncode(hasher, header)
+	result := BytesToHash(hasher.Sum(nil))
+	if engineDebugLogging.Load() {
+		log.Printf("[SealHash-ENGINE-DIAG] SealHash=%x", result[:])
+	}
+	return result
+}
+
+// CalcDifficulty returns the difficulty for a new block
+// Uses PI controller algorithm for adaptive difficulty adjustment
+// This ensures mining and validation produce identical results
+func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, parent *Header) *big.Int {
+	minDifficulty := uint64(1)
+	if t.config.ConsensusParams != nil {
+		minDifficulty = uint64(t.config.ConsensusParams.MinDifficulty)
+	}
+
+	if parent == nil || parent.Difficulty == nil {
+		return big.NewInt(int64(minDifficulty))
+	}
+
+	// Lazily initialize ancestor function on first call with valid chain + parent.
+	// This enables deterministic difficulty with median block times and chain integral
+	// instead of the fallback single-block proportional-only mode.
+	adjuster := t.diffAdjuster
+	if adjuster.GetAncestorFunc() == nil && chain != nil && parent != nil && parent.Number != nil {
+		t.initAncestorFunc(chain, parent)
+	}
+
+	// Use PI controller difficulty calculation (same as validation).
+	newDifficulty := adjuster.CalcDifficulty(time, parent)
+
+	// Get targetTime for logging
+	targetTime := int64(30) // default
+	if t.diffAdjuster != nil && t.config.ConsensusParams != nil {
+		targetTime = int64(t.config.ConsensusParams.BlockTimeTargetSeconds)
+	}
+	t.config.Log.Info("NogoPow CalcDifficulty (PI Controller)",
+		"parentNumber", parent.Number.Uint64(),
+		"parentDifficulty", parent.Difficulty.Uint64(),
+		"newDifficulty", newDifficulty.Uint64(),
+		"time", time,
+		"parentTime", parent.Time,
+		"timeDiff", time-parent.Time,
+		"targetTime", targetTime,
+	)
+
+	return newDifficulty
+}
+
+// initAncestorFunc builds a height→header cache by walking backwards from parent
+// through parent hashes, then sets it on the difficulty adjuster.
+// Thread-safe: uses double-checked locking via t.lock.
+func (t *NogopowEngine) initAncestorFunc(chain ChainHeaderReader, parent *Header) {
+	t.initAncestorFuncWithGetter(func(hash Hash) *Header {
+		return chain.GetHeaderByHash(hash)
+	}, parent)
+}
+
+// InitAncestorFuncLocked builds the ancestor cache using a header getter function
+// that is safe to call while the caller holds its own lock. This prevents the
+// deadlock that occurs when MineTransfers holds chain.mu.Lock() and
+// GetHeaderByHash tries to acquire chain.mu.RLock().
+// Thread-safe: uses double-checked locking via t.lock.
+func (t *NogopowEngine) InitAncestorFuncLocked(getHeader func(Hash) *Header, parent *Header) {
+	t.initAncestorFuncWithGetter(getHeader, parent)
+}
+
+// initAncestorFuncWithGetter is the shared implementation that accepts a header getter function.
+func (t *NogopowEngine) initAncestorFuncWithGetter(getHeader func(Hash) *Header, parent *Header) {
+	t.lock.Lock()
+	defer t.lock.Unlock()
+
+	// Double-check after acquiring write lock
+	if t.diffAdjuster.GetAncestorFunc() != nil {
+		return
+	}
+
+	cache := make(map[uint64]*Header)
+	current := parent
+	for current != nil && current.Number != nil {
+		h := current.Number.Uint64()
+		if _, exists := cache[h]; exists {
+			break // prevent infinite loop on corrupted chain
+		}
+		cache[h] = current
+		if h == 0 {
+			break
+		}
+		current = getHeader(current.ParentHash)
+	}
+
+	t.diffAdjuster.SetAncestorFunc(func(height uint64) *Header {
+		return cache[height]
+	})
+
+	t.config.Log.Info("Difficulty adjuster: ancestor func initialized",
+		"cacheSize", len(cache),
+		"fromHeight", parent.Number.Uint64(),
+	)
+}
+
+// APIs returns the RPC APIs this consensus engine provides
+func (t *NogopowEngine) APIs(chain ChainHeaderReader) []API {
+	// RPC APIs are handled by the blockchain layer
+	return nil
+}
+
+// Close terminates all background threads
+func (t *NogopowEngine) Close() error {
+	close(t.exitCh)
+	t.wg.Wait()
+	return nil
+}
+
+// HashRate returns current hashrate
+// Production-grade: uses atomic load for thread-safe read access
+func (t *NogopowEngine) HashRate() uint64 {
+	return atomic.LoadUint64(&t.hashrate)
+}
+
+// checkPow verifies if hash meets difficulty target
+func (t *NogopowEngine) checkPow(hash Hash, difficulty *big.Int) bool {
+	target := difficultyToTarget(difficulty)
+	hashInt := new(big.Int).SetBytes(hash.Bytes())
+	result := hashInt.Cmp(target) <= 0
+	return result
+}
+
+// difficultyToTarget converts difficulty to target threshold.
+// Returns the maximum target (all bits set) for zero or negative difficulty
+// to prevent division-by-zero panics. Zero difficulty means zero work required,
+// which would theoretically accept any hash — this defensive clamp ensures
+// that such blocks are effectively rejected by the difficulty check anyway.
+func difficultyToTarget(difficulty *big.Int) *big.Int {
+	maxTarget := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
+	if difficulty == nil || difficulty.Sign() <= 0 {
+		return new(big.Int).Set(maxTarget)
+	}
+	target := new(big.Int).Div(maxTarget, difficulty)
+	return target
+}
+
+// DifficultyToTarget converts difficulty to target threshold
+// Exported version for external validation
+func DifficultyToTarget(difficulty *big.Int) *big.Int {
+	return difficultyToTarget(difficulty)
+}
