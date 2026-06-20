@@ -1,6 +1,6 @@
 module github.com/nogochain/nogocommons
 
-go 1.25.10
+go 1.23
 
 require (
 	github.com/aead/siphash v1.0.1
