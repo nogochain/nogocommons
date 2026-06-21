@@ -114,9 +114,11 @@ func (engine *NogopowEngine) VerifyBTCDBlock(btcd *BTCDBlockHeader, difficulty *
 		return fmt.Errorf("VerifyBTCDBlock: failed to convert header")
 	}
 
-	// Compute seed hash and verify proof-of-work.
-	seed := engine.SealHash(hdr)
-	return engine.VerifySealWithBlockHash(hdr, seed)
+	// SealHash(hdr) is the blockHash (varies with Nonce), not the cache seed.
+	// VerifySealWithBlockHash internally calls calcSeed() which derives the
+	// correct seed from header.ParentHash.
+	blockHash := engine.SealHash(hdr)
+	return engine.VerifySealWithBlockHash(hdr, blockHash)
 }
 
 // ComputeBTCDSealHash computes the SealHash for a btcd-style block header.

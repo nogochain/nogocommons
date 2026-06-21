@@ -159,18 +159,23 @@ func (da *DifficultyAdjuster) CalcDifficulty(currentTime uint64, parent *Header)
 	// Compute deterministic difficulty
 	newDifficulty := da.calculateDeterministicDifficulty(avgBlockTime, targetTime, parentDiff, parent)
 
-	log.Printf("[Difficulty] Deterministic: parentDiff=%d, avgTime=%ds, target=%ds, calculated=%d",
-		parentDiff.Uint64(), avgBlockTime, targetTime, newDifficulty.Uint64())
+	// Log with full big.Int string to avoid truncation for values > 2^64.
+	log.Printf("[Difficulty] Deterministic: parentDiff=%s, avgTime=%ds, target=%ds, calculated=%s",
+		parentDiff.String(), avgBlockTime, targetTime, newDifficulty.String())
 
 	newDifficulty = da.enforceBoundaryConditionsLocked(newDifficulty, parentDiff)
 
 	var changePct float64
-	if parentDiff.Uint64() > 0 {
-		changePct = float64(newDifficulty.Int64()-parentDiff.Int64()) / float64(parentDiff.Uint64()) * 100
+	if parentDiff.Sign() > 0 {
+		parentFloat, _ := new(big.Float).SetInt(parentDiff).Float64()
+		newFloat, _ := new(big.Float).SetInt(newDifficulty).Float64()
+		if parentFloat > 0 {
+			changePct = (newFloat - parentFloat) / parentFloat * 100
+		}
 	}
 
-	log.Printf("[Difficulty] Result: %d -> %d (%.1f%% change)",
-		parentDiff.Uint64(), newDifficulty.Uint64(), changePct)
+	log.Printf("[Difficulty] Result: %s -> %s (%.1f%% change)",
+		parentDiff.String(), newDifficulty.String(), changePct)
 
 	return newDifficulty
 }

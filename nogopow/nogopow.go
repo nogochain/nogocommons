@@ -418,6 +418,24 @@ func (t *NogopowEngine) ComputePoWWithCache(blockHash, seed Hash, cacheData []ui
 	return hashMatrix(result)
 }
 
+// ComputePoWHash computes the NogoPow proof-of-work hash as a standalone
+// function without requiring an engine instance.  It generates the Salsa20/8
+// Scrypt cache from seed on demand, then performs the matrix multiplication
+// and FNV reduction via hashMatrix.
+//
+// Parameters:
+//   - blockHash: SealHash(header) — varies with Nonce, selects sub-matrices
+//   - seed:      header.ParentHash — fixed for a given parent, selects matrix pool
+//
+// This is the canonical NogoPow PoW computation used by both node validation
+// (blockchain/validate.go) and external miners (nogominer), ensuring
+// deterministic identical results across all implementations.
+func ComputePoWHash(blockHash, seed Hash) Hash {
+	cacheData := CalcSeedCache(seed.Bytes())
+	result := mulMatrixPooled(blockHash.Bytes(), cacheData)
+	return hashMatrix(result)
+}
+
 // CacheData returns the cached computation data for the given seed.
 func (t *NogopowEngine) CacheData(seed Hash) []uint32 {
 	return t.cache.GetData(seed.Bytes())

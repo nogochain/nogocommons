@@ -168,7 +168,7 @@ const (
 
 // NogoPow limit values.
 var (
-	NogoPowLimitMain = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 224), big.NewInt(1))
+	NogoPowLimitMain = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(1))
 	NogoPowLimitTest = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(1))
 )
 
@@ -242,6 +242,10 @@ func init() {
 	copy(nocoGenesisCoinbaseScript[3:23], pubkeyHash)
 	nocoGenesisCoinbaseScript[23] = 0x88 // OP_EQUALVERIFY
 	nocoGenesisCoinbaseScript[24] = 0xac // OP_CHECKSIG
+
+	// Patch genesis block TxOut PkScript — the var initializer ran before
+	// init(), so nocoGenesisCoinbaseScript was nil at block construction time.
+	nocoGenesisBlock.Transactions[0].TxOut[0].PkScript = nocoGenesisCoinbaseScript
 
 	// Recompute Merkle root (changed because genesis TxOut was added).
 	nocoGenesisBlock.Header.MerkleRoot = nocoGenesisBlock.Transactions[0].TxHash()
@@ -322,12 +326,17 @@ var MainNetParams = Params{
 	MaxTxPerBlock:    4096,
 	CoinbaseMaturity: 100,
 
-	// NogoPow
+	// NogoPow — start at minimum difficulty for fast bootstrap, then
+	// difficulty retarget converges to 60-second blocks automatically.
+	//   GenesisDifficultyBits = 0x207fffff → target 2^255 (easiest)
+	//   Each block: ratio = 60s / actualTime, clamped to [¼, 4×]
+	//   Fast blocks → difficulty rises; slow blocks → difficulty falls
 	MinDifficulty:         1,
-	MaxDifficulty:         1 << 31,
+	MaxDifficulty:         1 << 30,
+	ReduceMinDifficulty:   false,          // use full retarget logic
 	PowLimit:              NogoPowLimitMain,
-	PowLimitBits:          0x1d00ffff,
-	GenesisDifficultyBits: 0x207fffff,
+	PowLimitBits:          0x207fffff,     // 2^255 (easiest possible)
+	GenesisDifficultyBits: 0x207fffff,     // start at minimum difficulty
 
 	// Economic Model
 	PreAllocation:       1_000_000 * 100_000_000, // 1,000,000 NOGO
@@ -372,12 +381,13 @@ var TestNet3Params = Params{
 	MaxTxPerBlock:    4096,
 	CoinbaseMaturity: 10,
 
-	// NogoPow
-	MinDifficulty:         1,
-	MaxDifficulty:         1 << 31,
-	PowLimit:              NogoPowLimitTest,
-	PowLimitBits:          0x207fffff,
-	GenesisDifficultyBits: 0x207fffff,
+	// NogoPow (testnet: minimum difficulty → auto-converge to 30s)
+	MinDifficulty:          1,
+	MaxDifficulty:          1 << 30,
+	ReduceMinDifficulty:    false,          // use full retarget logic
+	PowLimit:               NogoPowLimitTest,
+	PowLimitBits:           0x207fffff,     // 2^255 (easiest possible)
+	GenesisDifficultyBits:  0x207fffff,     // start at minimum difficulty
 
 	// Economic Model (testnet: fast decay)
 	PreAllocation:       10_000_000 * 100_000_000, // 10,000,000 NOGO
