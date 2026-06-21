@@ -19,13 +19,13 @@ const (
 
 // PI controller tuning constants — v2.0 optimized for stability.
 const (
-	defaultKp = 0.10 // medium proportional gain: balances response speed vs stability
-	defaultKi = 0.02 // medium integral gain: moderate accumulation of persistent error
+	defaultKp = 0.25 // increased from 0.10: faster proportional response to block time error
+	defaultKi = 0.05 // increased from 0.02: faster elimination of systematic bias
 
 	integralDecay = 0.95 // faster decay from 0.97: strong-CPU impact fades in ~20 blocks
 
-	integralClampMin = -1.5 // tightened from -3.0
-	integralClampMax = 1.5  // tightened from 3.0
+	integralClampMin = -1.0 // tightened from -1.5: reduce overshoot during correction
+	integralClampMax = 1.0  // tightened from 1.5: reduce overshoot during strong-CPU events
 
 	scanDepth = 100
 
@@ -37,10 +37,10 @@ const (
 
 	// Per-block adjustment caps — asymmetric: slow up, fast down.
 	normalModeCapUp   = 1.12 // max +12% per block (was ±8%, now +12% for faster catch-up)
-	normalModeCapDown = 0.92 // max -8% per block (normal mode)
+	normalModeCapDown = 0.85 // max -15% per block (faster difficulty decrease when slow)
 
 	// Deadband: no adjustment when error is within ±10%.
-	deadbandErrorRatio = 0.10
+	deadbandErrorRatio = 0.05 // tightened from 0.10: ±5% deadband for quicker response
 
 	// PI/DES blend weights.
 	piWeight  = 0.4 // reduced from 0.7
@@ -214,7 +214,7 @@ func (da *DifficultyAdjuster) computeAverageBlockTime(currentTime uint64, parent
 		if len(timeDiffs) > 0 {
 			// Compute trimmed mean (discard top/bottom 20%) for resistance to outliers.
 			sort.Slice(timeDiffs, func(i, j int) bool { return timeDiffs[i] < timeDiffs[j] })
-			mean := trimmedMean(timeDiffs, 0.2)
+			mean := trimmedMean(timeDiffs, 0.1) // reduced from 0.2: keep more slow blocks in average
 
 			log.Printf("[TrimmedMean] window=%d, mean=%ds, min=%ds, max=%ds",
 				len(timeDiffs), mean, timeDiffs[0], timeDiffs[len(timeDiffs)-1])
