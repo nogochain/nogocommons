@@ -274,7 +274,7 @@ var nocoGenesisBlock = wire.MsgBlock{
 		Version:    1,
 		PrevBlock:  chainhash.Hash{},
 		MerkleRoot: chainhash.Hash{},
-		Timestamp:  time.Unix(1750262400, 0), // 2026-06-19T00:00:00Z
+		Timestamp:  time.Unix(1780725960, 0), // 2026-06-06T06:06:00Z
 		Bits:       0x207fffff,
 		Nonce:      0,
 	},
@@ -300,7 +300,14 @@ var MainNetParams = Params{
 	Name:        "mainnet",
 	Net:         MainNetMagic,
 	DefaultPort: "19444",
-	DNSSeeds:    []DNSSeed{},
+	DNSSeeds: []DNSSeed{
+		{Host: "seed1.nogochain.org", HasFiltering: false},
+		{Host: "seed2.nogochain.org", HasFiltering: false},
+		{Host: "seed3.nogochain.org", HasFiltering: false},
+		{Host: "seed1.nogochain.com", HasFiltering: false},
+		{Host: "seed2.nogochain.com", HasFiltering: false},
+		{Host: "seed3.nogochain.com", HasFiltering: false},
+	},
 	GenesisBlock: &nocoGenesisBlock,
 
 	// Address encoding (Bitcoin-compatible prefixes for secp256k1)
@@ -355,7 +362,14 @@ var TestNet3Params = Params{
 	Name:        "testnet",
 	Net:         TestNetMagic,
 	DefaultPort: "19555",
-	DNSSeeds:    []DNSSeed{},
+	DNSSeeds: []DNSSeed{
+		{Host: "testnet-seed1.nogochain.org", HasFiltering: false},
+		{Host: "testnet-seed2.nogochain.org", HasFiltering: false},
+		{Host: "testnet-seed3.nogochain.org", HasFiltering: false},
+		{Host: "testnet-seed1.nogochain.com", HasFiltering: false},
+		{Host: "testnet-seed2.nogochain.com", HasFiltering: false},
+		{Host: "testnet-seed3.nogochain.com", HasFiltering: false},
+	},
 	GenesisBlock: &nocoGenesisBlock,
 
 	// Address encoding (Bitcoin testnet prefixes)

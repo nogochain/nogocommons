@@ -42,11 +42,11 @@ func NewDifficultyCalculator(consensusParams *ConsensusParams) *DifficultyCalcul
 	}
 }
 
-// SetAncestorFunc sets the ancestor lookup function for deterministic
-// difficulty computation. When set, the calculator computes difficulty
-// from chain data rather than using a running accumulator.
+// SetAncestorFunc is a no-op retained for API compatibility.
+// v4.0 Kp‑P controller requires no ancestor lookups — difficulty is a
+// pure function of parent header and block interval.
 func (dc *DifficultyCalculator) SetAncestorFunc(fn GetAncestorFunc) {
-	dc.adjuster.SetAncestorFunc(fn)
+	// No-op: Kp‑P controller has zero hidden state.
 }
 
 // CalcNextDifficulty calculates difficulty for next block given parent block

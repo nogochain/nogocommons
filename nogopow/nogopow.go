@@ -465,23 +465,17 @@ func (t *NogopowEngine) CalcDifficulty(chain ChainHeaderReader, time uint64, par
 		return big.NewInt(int64(minDifficulty))
 	}
 
-	// Lazily initialize ancestor function on first call with valid chain + parent.
-	// This enables deterministic difficulty with median block times and chain integral
-	// instead of the fallback single-block proportional-only mode.
+	// v4.0 Kp‑P controller: difficulty is a pure function of parent header
+	// and block interval — no ancestor lookups needed.
 	adjuster := t.diffAdjuster
-	if adjuster.GetAncestorFunc() == nil && chain != nil && parent != nil && parent.Number != nil {
-		t.initAncestorFunc(chain, parent)
-	}
-
-	// Use PI controller difficulty calculation (same as validation).
 	newDifficulty := adjuster.CalcDifficulty(time, parent)
 
 	// Get targetTime for logging
-	targetTime := int64(30) // default
+	targetTime := int64(60) // default
 	if t.diffAdjuster != nil && t.config.ConsensusParams != nil {
 		targetTime = int64(t.config.ConsensusParams.BlockTimeTargetSeconds)
 	}
-	t.config.Log.Info("NogoPow CalcDifficulty (PI Controller)",
+	t.config.Log.Info("NogoPow CalcDifficulty (Kp‑P Controller v4.0)",
 		"parentNumber", parent.Number.Uint64(),
 		"parentDifficulty", parent.Difficulty.Uint64(),
 		"newDifficulty", newDifficulty.Uint64(),

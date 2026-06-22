@@ -20,7 +20,7 @@ func defaultTestConsensusParams() *ConsensusParams {
 	}
 }
 
-// TestDeterministicDifficulty_Basic tests basic deterministic difficulty calculation
+// TestDeterministicDifficulty_Basic tests basic deterministic difficulty calculation.
 func TestDeterministicDifficulty_Basic(t *testing.T) {
 	params := defaultTestConsensusParams()
 	adjuster := NewDifficultyAdjuster(params)
@@ -30,18 +30,18 @@ func TestDeterministicDifficulty_Basic(t *testing.T) {
 		Time:       1000,
 	}
 
-	// Call CalcDifficulty multiple times with same inputs
-	// Without ancestor function, integral defaults to 0 (P-only control)
+	// Call CalcDifficulty twice with same inputs.
+	// v4.0 Kp‑P controller is stateless — same inputs → same output.
 	result1 := adjuster.CalcDifficulty(1030, parent)
 	result2 := adjuster.CalcDifficulty(1030, parent)
 
-	// Same inputs must produce same outputs (deterministic)
+	// Same inputs must produce same outputs (deterministic).
 	if result1.Cmp(result2) != 0 {
 		t.Errorf("Deterministic property violated: same inputs produced different results %d vs %d",
 			result1, result2)
 	}
 
-	// Result must be within [0.5x, 2.0x] of parent
+	// Result must be within [0.5×, 2.0×] of parent (clamp bounds).
 	minExpected := new(big.Int).Div(parent.Difficulty, big.NewInt(2))
 	maxExpected := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
 	if result1.Cmp(minExpected) < 0 {
@@ -52,7 +52,8 @@ func TestDeterministicDifficulty_Basic(t *testing.T) {
 	}
 }
 
-// TestDeterministicDifficulty_OnTarget tests difficulty stays near parent when on target
+// TestDeterministicDifficulty_OnTarget tests difficulty stays at parent level
+// when the block interval is exactly the target (deadband threshold).
 func TestDeterministicDifficulty_OnTarget(t *testing.T) {
 	params := defaultTestConsensusParams()
 	adjuster := NewDifficultyAdjuster(params)
@@ -62,17 +63,15 @@ func TestDeterministicDifficulty_OnTarget(t *testing.T) {
 		Time:       1000,
 	}
 
-	// 30s block time = target → difficulty should stay near 1000
+	// 30 s block time = target → ratio = 1.0 → deadband → no change.
 	newDiff := adjuster.CalcDifficulty(1030, parent)
 
-	// Without ancestor, integral=0, P-only control with error ≈ (30-30)/30 = 0
-	// multiplier ≈ 1 - (0.15*0 + 0.03*0) = 1.0
 	if newDiff.Cmp(big.NewInt(1000)) != 0 {
 		t.Errorf("Expected difficulty near 1000 when on target, got %d", newDiff)
 	}
 }
 
-// TestDeterministicDifficulty_SlowBlocks tests difficulty decreases when blocks are slow
+// TestDeterministicDifficulty_SlowBlocks tests difficulty decreases when blocks are slow.
 func TestDeterministicDifficulty_SlowBlocks(t *testing.T) {
 	params := defaultTestConsensusParams()
 	adjuster := NewDifficultyAdjuster(params)
@@ -82,7 +81,9 @@ func TestDeterministicDifficulty_SlowBlocks(t *testing.T) {
 		Time:       1000,
 	}
 
-	// 120s block time = 4x target → difficulty should decrease
+	// 120 s block time = 4× target → ratio = 0.25
+	// adj = 1 + Kp × (0.25 − 1) = 1 + 0.5 × (−0.75) = 0.625
+	// newDiff = ceil(1000 × 0.625) = 625 (< 1000, within clamp).
 	newDiff := adjuster.CalcDifficulty(1120, parent)
 
 	if newDiff.Cmp(parent.Difficulty) >= 0 {
@@ -90,14 +91,14 @@ func TestDeterministicDifficulty_SlowBlocks(t *testing.T) {
 			parent.Difficulty, newDiff)
 	}
 
-	// Must not drop below 50% of parent
+	// Must not drop below 50% of parent (clamp floor).
 	minAllowed := new(big.Int).Div(parent.Difficulty, big.NewInt(2))
 	if newDiff.Cmp(minAllowed) < 0 {
 		t.Errorf("Difficulty %d dropped below 50%% floor %d", newDiff, minAllowed)
 	}
 }
 
-// TestDeterministicDifficulty_FastBlocks tests difficulty increases when blocks are fast
+// TestDeterministicDifficulty_FastBlocks tests difficulty increases when blocks are fast.
 func TestDeterministicDifficulty_FastBlocks(t *testing.T) {
 	params := defaultTestConsensusParams()
 	adjuster := NewDifficultyAdjuster(params)
@@ -107,7 +108,9 @@ func TestDeterministicDifficulty_FastBlocks(t *testing.T) {
 		Time:       1000,
 	}
 
-	// 5s block time = faster than target → difficulty should increase
+	// 5 s block time, target = 30 s → ratio = 6.0
+	// adj = 1 + Kp × (6 − 1) = 1 + 0.5 × 5 = 3.5 → clamped to 2.0
+	// newDiff = ceil(1000 × 2.0) = 2000.
 	newDiff := adjuster.CalcDifficulty(1005, parent)
 
 	if newDiff.Cmp(parent.Difficulty) <= 0 {
@@ -115,10 +118,10 @@ func TestDeterministicDifficulty_FastBlocks(t *testing.T) {
 			parent.Difficulty, newDiff)
 	}
 
-	// Must not exceed 2x of parent
+	// Must not exceed 2× of parent (clamp ceiling).
 	maxAllowed := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
 	if newDiff.Cmp(maxAllowed) > 0 {
-		t.Errorf("Difficulty %d exceeded 2x floor %d", newDiff, maxAllowed)
+		t.Errorf("Difficulty %d exceeded 2× ceiling %d", newDiff, maxAllowed)
 	}
 }
 
@@ -168,54 +171,32 @@ func TestDeterministicDifficulty_Boundaries(t *testing.T) {
 	}
 }
 
-// TestDeterministicDifficulty_WithChainAncestor tests full deterministic
-// difficulty calculation with a chain ancestor function.
-func TestDeterministicDifficulty_WithChainAncestor(t *testing.T) {
+// TestDeterministicDifficulty_DifferentAdjusters tests that two independently
+// created adjusters produce identical results for the same (parent, time) pair.
+//
+// v4.0 Kp‑P controller is stateless — no ancestor function is required or
+// supported, so any two adjusters with the same params must agree exactly.
+func TestDeterministicDifficulty_DifferentAdjusters(t *testing.T) {
 	params := defaultTestConsensusParams()
-	adjuster := NewDifficultyAdjuster(params)
-
-	// Create a mock chain: 20 blocks with ~30s spacing (on target)
-	blocks := make([]*Header, 20)
-	for i := 0; i < 20; i++ {
-		blocks[i] = &Header{
-			Number:     big.NewInt(int64(i)),
-			Time:       uint64(1000 + uint64(i)*30),
-			Difficulty: big.NewInt(1000),
-		}
-	}
-
-	// Set ancestor function
-	adjuster.SetAncestorFunc(func(height uint64) *Header {
-		if height < uint64(len(blocks)) {
-			return blocks[height]
-		}
-		return nil
-	})
-
-	parent := blocks[19]
-	// 30s from parent → on target
-	result1 := adjuster.CalcDifficulty(parent.Time+30, parent)
-
-	// Without ancestor function (reset), result should differ slightly
-	// because integral is not computed from chain data
+	adjuster1 := NewDifficultyAdjuster(params)
 	adjuster2 := NewDifficultyAdjuster(params)
-	result2 := adjuster2.CalcDifficulty(parent.Time+30, parent)
 
-	// With ancestor, the chain integral provides additional correction
-	// Both results must be valid (within bounds)
+	parent := &Header{
+		Difficulty: big.NewInt(1000),
+		Time:       1000,
+	}
+
+	result1 := adjuster1.CalcDifficulty(1030, parent)
+	result2 := adjuster2.CalcDifficulty(1030, parent)
+
+	if result1.Cmp(result2) != 0 {
+		t.Errorf("Two adjusters with same params produced different results: %d vs %d",
+			result1, result2)
+	}
+
+	// Both must be positive
 	if result1.Cmp(big.NewInt(0)) <= 0 {
-		t.Errorf("Deterministic result must be positive, got %d", result1)
-	}
-	if result2.Cmp(big.NewInt(0)) <= 0 {
-		t.Errorf("Fallback result must be positive, got %d", result2)
-	}
-
-	// Both must be within [0.5x, 2.0x]
-	minExpected := new(big.Int).Div(parent.Difficulty, big.NewInt(2))
-	maxExpected := new(big.Int).Mul(parent.Difficulty, big.NewInt(2))
-	if result1.Cmp(minExpected) < 0 || result1.Cmp(maxExpected) > 0 {
-		t.Errorf("Deterministic result %d out of bounds [%d, %d]",
-			result1, minExpected, maxExpected)
+		t.Errorf("Result must be positive, got %d", result1)
 	}
 }
 
@@ -281,16 +262,16 @@ func TestDeterministicDifficulty_ValidateDifficulty(t *testing.T) {
 	}
 }
 
-// TestDeterministicDifficulty_Parameters tests PI controller parameters
+// TestDeterministicDifficulty_Parameters tests Kp‑P controller parameters.
 func TestDeterministicDifficulty_Parameters(t *testing.T) {
 	params := defaultTestConsensusParams()
 	adjuster := NewDifficultyAdjuster(params)
 
-	kp, ki := adjuster.GetParameters()
-	if kp != defaultKp {
-		t.Errorf("Expected Kp=%f, got %f", defaultKp, kp)
+	gotKp, gotDeadband := adjuster.GetParameters()
+	if gotKp != kpGain {
+		t.Errorf("Expected kpGain=%f, got %f", kpGain, gotKp)
 	}
-	if ki != defaultKi {
-		t.Errorf("Expected Ki=%f, got %f", defaultKi, ki)
+	if gotDeadband != kpDeadband {
+		t.Errorf("Expected deadband=%f, got %f", kpDeadband, gotDeadband)
 	}
 }

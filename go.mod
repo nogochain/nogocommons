@@ -1,9 +1,11 @@
 module github.com/nogochain/nogocommons
 
-go 1.23
+go 1.24.0
 
 require (
 	github.com/aead/siphash v1.0.1
+	github.com/btcsuite/btcd v0.23.4
+	github.com/btcsuite/btcd/chaincfg/chainhash v1.0.1
 	github.com/btcsuite/btclog v1.0.0
 	github.com/btcsuite/btcwallet/walletdb v1.5.1
 	github.com/btcsuite/btcwallet/wtxmgr v1.5.6
@@ -15,7 +17,6 @@ require (
 	github.com/kcalvinalvin/anet v0.0.0-20251112173137-d8ddc1f6dbee
 	github.com/kkdai/bstream v1.0.0
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.9
-	github.com/lightningnetwork/lnd/queue v1.2.0
 	github.com/stretchr/testify v1.11.1
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7
 	golang.org/x/crypto v0.46.0
@@ -25,10 +26,8 @@ require (
 )
 
 require (
-	github.com/btcsuite/btcd v0.23.4 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.1.3 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.0 // indirect
-	github.com/btcsuite/btcd/chaincfg/chainhash v1.0.1 // indirect
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/lightningnetwork/lnd/clock v1.0.1 // indirect
