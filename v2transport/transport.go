@@ -1,4 +1,9 @@
-﻿package v2transport
+﻿// Copyright (c) 2025-2026 The NogoChain Contributors
+// Copyright (c) 2013-2018 The btcsuite developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
+package v2transport
 
 import (
 	"bytes"
@@ -7,7 +12,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sync/atomic"
 
 	"golang.org/x/crypto/hkdf"
 
@@ -24,12 +28,12 @@ const (
 	ignoreBitPos packetBit = 7
 )
 
-// BitcoinNet is a type used to represent the Bitcoin network that we're
+// NogoNet is a type used to represent the NogoChain network that we're
 // connecting to.
 //
 // NOTE: This is identical to the wire.BitcoinNet type, but allows us to shed a
 // large module dependency.
-type BitcoinNet uint32
+type NogoNet uint32
 
 const (
 	// garbageSize is the length in bytes of the garbage terminator that
@@ -66,18 +70,6 @@ var (
 	// transportVersion is the transport version we are currently using.
 	transportVersion = []byte{}
 
-	// errInsufficientBytes is returned when we haven't received enough
-	// bytes to populate their ElligatorSwift encoded public key.
-	errInsufficientBytes = fmt.Errorf("insufficient bytes received")
-
-	// ErrUseV1Protocol is returned when the initiating peer is attempting
-	// to use the V1 protocol.
-	ErrUseV1Protocol = fmt.Errorf("use v1 protocol instead")
-
-	// errWrongNetV1Peer is returned when a v1 peer is using the wrong
-	// network.
-	errWrongNetV1Peer = fmt.Errorf("peer is v1 and using the wrong network")
-
 	// errGarbageTermNotRecv is returned when a v2 peer never sends us their
 	// garbage terminator.
 	errGarbageTermNotRecv = fmt.Errorf("no garbage term received")
@@ -89,21 +81,9 @@ var (
 	// errFailedToRecv is returned when a Read call fails.
 	errFailedToRecv = fmt.Errorf("failed to recv data")
 
-	// errPrefixTooLarge is returned if receivedPrefix is ever too large.
-	// This shouldn't happen unless the API is mis-used.
-	errPrefixTooLarge = fmt.Errorf("prefix too large - internal error")
-
 	// errGarbageTooLarge is returned if a caller attempts to send garbage
 	// larger than normal.
 	errGarbageTooLarge = fmt.Errorf("garbage too large")
-
-	// ErrShouldDowngradeToV1 is returned when we send the peer our
-	// ellswift key and they immediately hang up. This indicates that they
-	// don't understand v2 transport and interpreted the 64-byte key as a
-	// v1 message header + message. This will (always?) decode to an
-	// invalid command and checksum. The caller should try connecting to
-	// the peer with the OG v1 transport.
-	ErrShouldDowngradeToV1 = fmt.Errorf("should downgrade to v1")
 )
 
 // Peer defines the components necessary for sending/receiving data over the v2
@@ -116,13 +96,8 @@ type Peer struct {
 	ellswiftOurs [64]byte
 
 	// sentGarbage is the garbage sent after the public key. This may be up
-	// to
-	// 4095 bytes.
+	// to 4095 bytes.
 	sentGarbage []byte
-
-	// receivedPrefix is used to determine which transport protocol we're
-	// using.
-	receivedPrefix []byte
 
 	// sendL is the cipher used to send encrypted packet lengths.
 	sendL *FSChaCha20
@@ -158,11 +133,6 @@ type Peer struct {
 	// currently only used in the test vectors.
 	sessionID []byte
 
-	// shouldDowngradeToV1 is true if the handshake failed in a way that
-	// indicates the peer does not support v2, and a v1 attempt should be
-	// made.
-	shouldDowngradeToV1 atomic.Bool
-
 	// rw is the underlying object that will be read from / written to in
 	// calls to V2EncPacket and V2ReceivePacket.
 	rw io.ReadWriter
@@ -174,25 +144,24 @@ func NewPeer() *Peer {
 	// the sessionID must have space for the hkdf Expand-derived Reader to
 	// work.
 	return &Peer{
-		receivedPrefix: make([]byte, 0),
-		initiatorL:     make([]byte, 32),
-		initiatorP:     make([]byte, 32),
-		responderL:     make([]byte, 32),
-		responderP:     make([]byte, 32),
-		sessionID:      make([]byte, 32),
+		initiatorL: make([]byte, 32),
+		initiatorP: make([]byte, 32),
+		responderL: make([]byte, 32),
+		responderP: make([]byte, 32),
+		sessionID:  make([]byte, 32),
 	}
 }
 
 // createV2Ciphers constructs the packet-length and packet encryption ciphers.
 func (p *Peer) createV2Ciphers(ecdhSecret []byte, initiating bool,
-	net BitcoinNet) error {
+	net NogoNet) error {
 
 	log.Debugf("Creating v2 ciphers (initiating=%v, net=%v)", initiating,
 		net)
 
-	// Define the salt as the string "bitcoin_v2_shared_secret" followed by
-	// the BitcoinNet's "magic" bytes.
-	salt := []byte("bitcoin_v2_shared_secret")
+	// Define the salt as the string "nogochain_v2_shared_secret" followed by
+	// the NogoNet's "magic" bytes.
+	salt := []byte("nogochain_v2_shared_secret")
 
 	var magic [4]byte
 	binary.LittleEndian.PutUint32(magic[:], uint32(net))
@@ -343,13 +312,6 @@ func (p *Peer) createV2Ciphers(ecdhSecret []byte, initiating bool,
 			"recvL, recvP)")
 	}
 
-// Forward secrecy requires wiping key material after cipher initialization.
-// The Go runtime's garbage collector will eventually reclaim these values;
-// explicit memory cleansing (memory_cleanse) is not directly available
-// in standard Go without unsafe operations.
-//     memory_cleanse(ecdhSecret, prk, initiator_L, initiator_P, responder_L, responder_K)
-	// - golang analogue?
-
 	return nil
 }
 
@@ -380,74 +342,30 @@ func (p *Peer) InitiateV2Handshake(garbageLen int) error {
 	return nil
 }
 
-// RespondV2Handshake responds to the initiator, determines if the initiator
-// wants to use the v2 protocol and if so returns our ElligatorSwift-encoded
-// public key followed by our garbage data over. If the initiator does not want
-// to use the v2 protocol, we'll instead revert to the v1 protocol.
-func (p *Peer) RespondV2Handshake(garbageLen int, net BitcoinNet) error {
-	v1Prefix := createV1Prefix(net)
-
-	log.Debugf("Responding to v2 handshake (garbageLen=%d, net=%v)",
-		garbageLen, net)
-
-	log.Tracef("Expecting v1 prefix: %x", v1Prefix)
+// RespondV2Handshake generates our keypair and sends our ElligatorSwift-encoded
+// public key followed by garbage data to the initiator.
+func (p *Peer) RespondV2Handshake(garbageLen int) error {
+	log.Debugf("Responding to v2 handshake (garbageLen=%d)", garbageLen)
 
 	var err error
-
-	// Check and see if the received bytes match the v1 protocol's message
-	// prefix. If it does, we'll revert to the v1 protocol. If it doesn't,
-	// we'll treat this as a v2 peer.
-	for len(p.receivedPrefix) < len(v1Prefix) {
-		log.Tracef("Received prefix len=%d, need=%d",
-			len(p.receivedPrefix), len(v1Prefix))
-
-		var receiveBytes []byte
-		receiveBytes, _, err = p.Receive(1)
-		if err != nil {
-			log.Errorf("Failed to receive byte for v1 prefix "+
-				"check: %v", err)
-			return err
-		}
-
-		log.Tracef("Current received prefix: %x", p.receivedPrefix)
-
-		p.receivedPrefix = append(p.receivedPrefix, receiveBytes...)
-
-		lastIdx := len(p.receivedPrefix) - 1
-
-		if p.receivedPrefix[lastIdx] != v1Prefix[lastIdx] {
-			log.Debugf("Received byte %x does not match v1 "+
-				"prefix at index %d, assuming v2 peer",
-				p.receivedPrefix[lastIdx], lastIdx)
-
-			p.privkeyOurs, p.ellswiftOurs, err = ellswift.EllswiftCreate()
-			if err != nil {
-				log.Errorf("Failed to create ellswift "+
-					"keypair: %v", err)
-				return err
-			}
-
-			log.Tracef("Created ellswift keypair, pubkey=%x",
-				p.ellswiftOurs)
-
-			data, err := p.generateKeyAndGarbage(garbageLen)
-			if err != nil {
-				return err
-			}
-
-			// Send over our ElligatorSwift-encoded pubkey followed
-			// by our randomly generated garbage.
-			log.Debugf("Sending ellswift pubkey and garbage "+
-				"(total_len=%d)", len(data))
-			p.Send(data)
-
-			return nil
-		}
+	p.privkeyOurs, p.ellswiftOurs, err = ellswift.EllswiftCreate()
+	if err != nil {
+		log.Errorf("Failed to create ellswift keypair: %v", err)
+		return err
 	}
 
-	log.Infof("Received full v1 prefix match, reverting to v1 protocol")
+	log.Tracef("Created ellswift keypair, pubkey=%x", p.ellswiftOurs)
 
-	return ErrUseV1Protocol
+	data, err := p.generateKeyAndGarbage(garbageLen)
+	if err != nil {
+		return err
+	}
+
+	log.Debugf("Sending ellswift pubkey and garbage (total_len=%d)",
+		len(data))
+	p.Send(data)
+
+	return nil
 }
 
 // generateKeyAndGarbage returns a byte slice containing our ellswift-encoded
@@ -480,77 +398,19 @@ func (p *Peer) generateKeyAndGarbage(garbageLen int) ([]byte, error) {
 	return data, nil
 }
 
-// createV1Prefix is a helper function that returns the first 16 bytes of the
-// version message's header.
-func createV1Prefix(net BitcoinNet) []byte {
-	v1Prefix := make([]byte, 0, 4+12)
-
-	// The v1 transport protocol uses the network's 4 magic bytes followed by
-	// "version" followed by 5 bytes of 0.
-	var magic [4]byte
-	binary.LittleEndian.PutUint32(magic[:], uint32(net))
-
-	versionBytes := []byte("version\x00\x00\x00\x00\x00")
-
-	v1Prefix = append(v1Prefix, magic[:]...)
-	v1Prefix = append(v1Prefix, versionBytes...)
-
-	return v1Prefix
-}
-
 // CompleteHandshake finishes the v2 protocol negotiation and optionally sends
 // decoy packets after sending the garbage terminator.
 func (p *Peer) CompleteHandshake(initiating bool, decoyContentLens []int,
-	btcnet BitcoinNet) error {
+	nognet NogoNet) error {
 
 	log.Debugf("Completing v2 handshake (initiating=%v, "+
 		"num_decoys=%d, net=%v)", initiating, len(decoyContentLens),
-		btcnet)
+		nognet)
 
-	var receivedPrefix []byte
-	if initiating {
-		log.Trace("Initiator expecting 64 bytes for peer's " +
-			"ellswift key")
+	log.Trace("Expecting 64 bytes for peer's ellswift key")
 
-		receivedPrefix = make([]byte, 0, 16)
-	} else {
-		// If we are the responder, we have already received bytes to
-		// compare against the v1 transport protocol's starting bytes.
-		// We have to account for these when reading the rest of the 64
-		// bytes off the wire to properly parse the remote's
-		// ellswift-encoded public key.
-		receivedPrefix = p.receivedPrefix
-
-		log.Tracef("Responder already has prefix_len=%d, expecting %d "+
-			"more bytes for peer's ellswift key",
-			len(receivedPrefix), 64-len(receivedPrefix))
-	}
-
-	recvData, numRead, err := p.Receive(64 - len(receivedPrefix))
+	recvData, _, err := p.Receive(64)
 	if err != nil {
-		// If we receive an error when reading off the wire and we read
-		// zero bytes, then we will reconnect to the peer using v1.
-		// There are several different errors that Receive can return
-		// that indicate we should reconnect. Instead of special-casing
-		// them all, just perform these checks if any error was
-		// returned.
-		if numRead == 0 && initiating {
-			// The peer most likely attempted to parse our 64-byte
-			// elligator-swift key as a version message and failed
-			// when trying to parse the message header into
-			// something valid. In this case, return a special
-			// error that signals to the server that we can
-			// reconnect with the OG v1 scheme.
-			log.Debugf("Received transport error during " +
-				"v2 handshake, retying downgraded v1 " +
-				"connection.")
-
-			p.shouldDowngradeToV1.Store(true)
-
-			return ErrShouldDowngradeToV1
-		}
-
-		// If we are the recipient, we can fail.
 		log.Errorf("Failed to receive peer's ellswift key data: %v",
 			err)
 		return err
@@ -559,47 +419,9 @@ func (p *Peer) CompleteHandshake(initiating bool, decoyContentLens []int,
 	log.Tracef("Received %d bytes for peer's ellswift key", len(recvData))
 
 	var ellswiftTheirs [64]byte
-
-	if initiating {
-		// If we are initiating, read all 64 bytes into ellswiftTheirs.
-		copy(ellswiftTheirs[:], recvData)
-	} else {
-		// If we are the responder, then we need to account for the
-		// bytes already received as part of matching against the
-		// starting v1 transport bytes. We sanity check receivedPrefix
-		// in case it is too large for some reason.
-		prefixLen := len(receivedPrefix)
-		if prefixLen > 16 {
-			log.Errorf("Responder's received prefix length %d is "+
-				"too large (> 16)", prefixLen)
-
-			return errPrefixTooLarge
-		}
-
-		copy(ellswiftTheirs[:], receivedPrefix)
-		copy(ellswiftTheirs[prefixLen:], recvData)
-	}
+	copy(ellswiftTheirs[:], recvData)
 
 	log.Tracef("Assembled peer's ellswift key: %x", ellswiftTheirs)
-
-	// Calculate the v1 protocol's message prefix and see if the bytes read
-	// read into ellswiftTheirs matches it.
-	v1Prefix := createV1Prefix(btcnet)
-
-	// ellswiftTheirs should be at least 16 bytes if receive succeeded, but
-	// just in case, check the size.
-	if len(ellswiftTheirs) < 16 {
-		log.Errorf("Received insufficient bytes (%d) for "+
-
-			"ellswift key", len(ellswiftTheirs))
-		return errInsufficientBytes
-	}
-
-	if !initiating && bytes.Equal(ellswiftTheirs[4:16], v1Prefix[4:16]) {
-		log.Warnf("Peer sent v1 version message for wrong network "+
-			"(expected %v)", btcnet)
-		return errWrongNetV1Peer
-	}
 
 	log.Debug("Calculating ECDH shared secret")
 
@@ -615,7 +437,7 @@ func (p *Peer) CompleteHandshake(initiating bool, decoyContentLens []int,
 
 	log.Tracef("Calculated ECDH shared secret: %x", ecdhSecret)
 
-	err = p.createV2Ciphers(ecdhSecret[:], initiating, btcnet)
+	err = p.createV2Ciphers(ecdhSecret[:], initiating, nognet)
 	if err != nil {
 		return err
 	}
@@ -854,12 +676,7 @@ func (p *Peer) V2ReceivePacket(aad []byte) ([]byte, error) {
 		log.Tracef("Decrypted plaintext (header + content): %x",
 			plaintext)
 
-		// Only the first packet is expected to have non-empty AAD. If
-		// the ignore bit is set, ignore the packet.
-		//
-		// AAD is only used for the first packet after the handshake;
-		// subsequent packets set AAD to nil, which is the expected
-		// behavior per BIP324.
+		// AAD is only used for the first packet after the handshake.
 		aad = nil
 		header := plaintext[:headerLen]
 		log.Tracef("Packet header: %x", header)
@@ -875,19 +692,7 @@ func (p *Peer) V2ReceivePacket(aad []byte) ([]byte, error) {
 	}
 }
 
-// ReceivedPrefix returns the partial header bytes we've already received.
-func (p *Peer) ReceivedPrefix() []byte {
-	return p.receivedPrefix
-}
-
-// ShouldDowngradeToV1 returns true if the v2 handshake failed in a way that
-// suggests the peer does not support v2 and a v1 connection should be
-// attempted.
-func (p *Peer) ShouldDowngradeToV1() bool {
-	return p.shouldDowngradeToV1.Load()
-}
-
-// UseWriterReader uses the passed-in ReadWriter to Send/Receive to/from.
+// UseReadWriter uses the passed-in ReadWriter to Send/Receive to/from.
 func (p *Peer) UseReadWriter(rw io.ReadWriter) {
 	p.rw = rw
 }
@@ -914,8 +719,6 @@ func (p *Peer) Receive(numBytes int) ([]byte, int, error) {
 	log.Tracef("Attempting to receive %d bytes", numBytes)
 
 	for {
-		// ReadFull guarantees total <= numBytes; this check is a safety
-		// net against logical errors in the read loop.
 		if total > numBytes {
 			// This should be logically impossible with io.ReadFull
 			// semantics used implicitly by the loop structure.
